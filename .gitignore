@@ -1,0 +1,15 @@
+*.o
+
+/bin/
+
+*~
+
+*.log
+
+*.d
+
+/.vscode/
+/.idea/
+
+.DS_Store
+Thumbs.db
