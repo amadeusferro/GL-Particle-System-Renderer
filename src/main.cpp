@@ -10,7 +10,7 @@
 
 #define WIDTH 1280
 #define HEIGHT 720
-#define NUM 10000
+#define NUM 4000
 
 #define SHOWQUAD 0
 
@@ -465,19 +465,35 @@ void render(float deltaTime) {
         }
     }
 
+    static float accumulator = 0.0f;
+    static bool canRender = false;
+
+    if(accumulator >= (1.0f / 30.0f)) {
+        canRender = true;
+        accumulator = 0.0f;
+    } else {
+        accumulator += deltaTime;
+        canRender = false;
+    }
+
+    if(canRender) {
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+
     glBindVertexArray(VAO);
         for (auto& circle : circles) {
             circle.update(deltaTime);
             circle.edges();
 
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(circle.Center, 0.0f));
-            model = glm::scale(model, glm::vec3(circle.Radius, circle.Radius, 1.0f));
-            glm::mat4 transform = projection * model;
+            if(canRender) {
+                glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(circle.Center, 0.0f));
+                model = glm::scale(model, glm::vec3(circle.Radius, circle.Radius, 1.0f));
+                glm::mat4 transform = projection * model;
 
-            glUniformMatrix4fv(transformLoc, 1, GL_FALSE, glm::value_ptr(transform));
-            glUniform3f(colorLoc, circle.Color.r, circle.Color.g, circle.Color.b);
-
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+                glUniformMatrix4fv(transformLoc, 1, GL_FALSE, glm::value_ptr(transform));
+                glUniform3f(colorLoc, circle.Color.r, circle.Color.g, circle.Color.b);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            }
         }
     glBindVertexArray(0);
     glUseProgram(0);
@@ -485,7 +501,6 @@ void render(float deltaTime) {
     // Rendering quadtree boundaries
 
     #if SHOWQUAD == 1
-
     static std::vector<GLfloat> lastQuadVertices;
     std::vector<GLfloat> currentQuadVertices = quadTree.getVertices();
 
@@ -499,11 +514,23 @@ void render(float deltaTime) {
     glUseProgram(quadPROG);
     glBindVertexArray(quadVAO);
     glLineWidth(2.0f);
-    glDrawArrays(GL_LINE_LOOP, 0, currentQuadVertices.size() / 2);
+        glDrawArrays(GL_LINE_LOOP, 0, currentQuadVertices.size() / 2);
     glBindVertexArray(0);
     glUseProgram(0);
-
     #endif
+}
+
+void setTitle(GLFWwindow* pWindow, float dt) {
+    static float accumulator = 0.0f;
+
+    if(accumulator >= 1.0f) {
+        accumulator = 0.0f;
+        char newTitle[20];
+        sprintf(newTitle, "Update: %f", (1.0f/dt));
+        glfwSetWindowTitle(pWindow, newTitle);
+    } else {
+        accumulator += dt;
+    }
 }
 
 int main() {
@@ -549,9 +576,9 @@ int main() {
     while (!glfwWindowShouldClose(myWindow)) {
         float currentTime = glfwGetTime();
         deltaTime = currentTime - lastFrameTime;
+        setTitle(myWindow, deltaTime);
         lastFrameTime = currentTime;
         glfwPollEvents();
-        glClear(GL_COLOR_BUFFER_BIT);
         render(deltaTime);
         glfwSwapBuffers(myWindow);
     }
