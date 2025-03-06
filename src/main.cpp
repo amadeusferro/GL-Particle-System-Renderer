@@ -7,12 +7,15 @@
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <thread>
+#include <mutex>
 
 #define WIDTH 1280
 #define HEIGHT 720
-#define NUM 4000
+#define NUM 2000
 
 #define SHOWQUAD 0
+#define VORTEX 1
 
 float randomFloat(float min, float max) {
     float random = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
@@ -33,6 +36,9 @@ GLuint indices[] = {
     0, 2, 3,
 };
 
+glm::vec2 mousePos = glm::vec2(0.0f, 0.0f);
+bool enableForce = false;
+
 struct Circle {
     glm::vec2 Center;
     glm::vec3 Color;
@@ -52,9 +58,38 @@ struct Circle {
         Mass(3.1415f * static_cast<float>(std::pow(radius, 2))) {}
 
     void update(float deltaTime) {
+        #if VORTEX == 1
+
+        float vortexStrength = 100000.0f;
+
         Velocity = Velocity + Aceleration * deltaTime;
         Center = Center + Velocity * deltaTime;
         Aceleration = glm::vec2(0.0f, 0.0f);
+
+        if (enableForce) {
+            glm::vec2 direction = mousePos - Center;
+            float distance = glm::length(direction);
+
+            if (distance > 0.0f) {
+                direction = glm::normalize(direction);
+
+                glm::vec2 tangential = glm::vec2(-direction.y, direction.x);
+
+                Velocity += tangential * (vortexStrength / distance) * deltaTime;
+            }
+        }
+
+        #else
+
+        Velocity = Velocity + Aceleration * deltaTime;
+        Center = Center + Velocity * deltaTime;
+        Aceleration = glm::vec2(0.0f, 0.0f);
+
+        if(enableForce) {
+            Velocity += (mousePos - Center) * 2.0f * deltaTime;
+        }
+
+        #endif
     }
 
     void edges() {
@@ -98,6 +133,10 @@ struct Circle {
 
             massFactor = (2 * Mass) / (Mass + other.Mass);
             other.Velocity += massFactor * (dotProduct / distanceSquared) * deltaPosition;
+            if(other.Radius < 200.0f || Radius < 200.0f) {
+                Velocity /= 1.005f;
+                other.Velocity /= 1.005f;
+            }
         }
     }
 };
@@ -283,6 +322,7 @@ Rectangle boundary(WIDTH/2, HEIGHT/2, WIDTH/2, HEIGHT/2);
 QuadTree<Circle*> quadTree(boundary, 15);
 GLuint quadVAO, quadVBO, quadPROG;
 std::vector<GLfloat> quadVertices;
+std::mutex mtx;
 
 const char* quadVertSrc = R"(
 #version 330 core
@@ -299,9 +339,29 @@ const char* quadFragSrc = R"(
 out vec4 fragColor;
 
 void main() {
-    fragColor = vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    fragColor = vec4(1.0f, 1.0f, 1.0f, 1.0f);
 }
 )";
+
+void updateCircles(std::vector<Circle>& circles, float deltaTime, size_t start, size_t end) {
+    for (size_t i = start; i < end; ++i) {
+        circles[i].update(deltaTime);
+        circles[i].edges();
+    }
+}
+
+void checkCollisions(std::vector<Circle>& circles, QuadTree<Circle*>& quadTree, size_t start, size_t end) {
+    for (size_t i = start; i < end; ++i) {
+        std::vector<Circle*> possibleCollisions;
+        Rectangle range(circles[i].Center.x, circles[i].Center.y, circles[i].Radius * 2, circles[i].Radius * 2);
+        quadTree.query(range, possibleCollisions);
+        for (auto& other : possibleCollisions) {
+            if (&circles[i] != other) {
+                circles[i].colides(*other);
+            }
+        }
+    }
+}
 
 void init() {
 
@@ -434,10 +494,10 @@ void init() {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 }
 
-void render(float deltaTime) {
+void render(float deltaTime, GLFWwindow* myWindow) {
     glUseProgram(PROG);
 
     GLint transformLoc = glGetUniformLocation(PROG, "uTransform");
@@ -454,21 +514,36 @@ void render(float deltaTime) {
         quadTree.insert(&circle);
     }
 
-    for (auto& circle : circles) {
-        std::vector<Circle*> possibleCollisions;
-        Rectangle range(circle.Center.x, circle.Center.y, circle.Radius * 2, circle.Radius * 2);
-        quadTree.query(range, possibleCollisions);
-        for (auto& other : possibleCollisions) {
-            if (&circle != other) {
-                circle.colides(*other);
-            }
-        }
+    const size_t numThreads = std::thread::hardware_concurrency();
+    std::vector<std::thread> threads;
+    size_t chunkSize = circles.size() / numThreads;
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        size_t start = i * chunkSize;
+        size_t end = (i == numThreads - 1) ? circles.size() : start + chunkSize;
+        threads.emplace_back(checkCollisions, std::ref(circles), std::ref(quadTree), start, end);
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    threads.clear();
+
+    for (size_t i = 0; i < numThreads; ++i) {
+        size_t start = i * chunkSize;
+        size_t end = (i == numThreads - 1) ? circles.size() : start + chunkSize;
+        threads.emplace_back(updateCircles, std::ref(circles), deltaTime, start, end);
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
     }
 
     static float accumulator = 0.0f;
     static bool canRender = false;
 
-    if(accumulator >= (1.0f / 30.0f)) {
+    if(accumulator >= (1.0f / 144.0f)) {
         canRender = true;
         accumulator = 0.0f;
     } else {
@@ -480,18 +555,20 @@ void render(float deltaTime) {
         glClear(GL_COLOR_BUFFER_BIT);
     }
 
+    static glm::vec4 red = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+    static glm::vec4 blue = glm::vec4(0.0f, 1.0f, 1.0f, 1.0f);
+
     glBindVertexArray(VAO);
         for (auto& circle : circles) {
-            circle.update(deltaTime);
-            circle.edges();
-
             if(canRender) {
                 glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(circle.Center, 0.0f));
                 model = glm::scale(model, glm::vec3(circle.Radius, circle.Radius, 1.0f));
                 glm::mat4 transform = projection * model;
 
+                glm::vec3 color = glm::mix(blue, red, glm::vec4((glm::length(circle.Velocity) + 100.0f) / 200.0f) - 0.4f);
+
                 glUniformMatrix4fv(transformLoc, 1, GL_FALSE, glm::value_ptr(transform));
-                glUniform3f(colorLoc, circle.Color.r, circle.Color.g, circle.Color.b);
+                glUniform3f(colorLoc, color.r, color.g, color.b);
                 glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
             }
         }
@@ -518,6 +595,10 @@ void render(float deltaTime) {
     glBindVertexArray(0);
     glUseProgram(0);
     #endif
+
+    if(canRender) {
+        glfwSwapBuffers(myWindow);
+    }
 }
 
 void setTitle(GLFWwindow* pWindow, float dt) {
@@ -537,7 +618,7 @@ int main() {
     srand(static_cast<unsigned int>(time(0)));
 
     for (int i = 0; i < NUM; i++) {
-        float radius = randomFloat(1.0f, 5.0f);
+        float radius = randomFloat(1.0f, 8.0f);
         Circle circle(
             radius,
             glm::vec2(randomFloat(radius, WIDTH - radius), randomFloat(radius, HEIGHT - radius)),
@@ -574,13 +655,19 @@ int main() {
     float lastFrameTime = glfwGetTime();
 
     while (!glfwWindowShouldClose(myWindow)) {
+        double x, y;
+        glfwGetCursorPos(myWindow, &x, &y);
+        mousePos = glm::vec2((float)x, (float)y);
+
+        enableForce = glfwGetKey(myWindow, GLFW_KEY_G) == GLFW_PRESS;
+        
         float currentTime = glfwGetTime();
         deltaTime = currentTime - lastFrameTime;
+
         setTitle(myWindow, deltaTime);
         lastFrameTime = currentTime;
         glfwPollEvents();
-        render(deltaTime);
-        glfwSwapBuffers(myWindow);
+        render(deltaTime, myWindow);
     }
 
     glDeleteProgram(PROG);
